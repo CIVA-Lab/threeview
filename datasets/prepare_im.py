@@ -12,7 +12,7 @@ from tqdm import tqdm
 import lightglue
 from lightglue.utils import load_image
 
-from utils.matching import LoFTRMatcher, get_matcher_string, get_extractor, read_loftr_image
+from utils.matching import get_matcher_string, get_extractor
 from utils.read_write_colmap import cam_to_K, read_model, Image
 
 
@@ -98,65 +98,57 @@ def extract_features(img_dir_path, images, cameras, out_dir, args):
 
 
 def get_overlap_areas(cameras, images, pts, img_ids):
-    img_id1, img_id2, img_id3 = img_ids
+    img_id1, img_id2 = img_ids
     imgs = list(images[x] for x in img_ids)
-    cam_1, cam_2, cam_3 = (cameras[x.camera_id] for x in imgs)
-    img_1, img_2, img_3 = imgs
+    cam_1, cam_2 = (cameras[x.camera_id] for x in imgs)
+    img_1, img_2 = imgs
 
     img_1_point3D_ids = np.array(img_1.point3D_ids)
     img_1_point3D_ids = img_1_point3D_ids[img_1_point3D_ids != -1]
     img_2_point3D_ids = np.array(img_2.point3D_ids)
     img_2_point3D_ids = img_2_point3D_ids[img_2_point3D_ids != -1]
-    img_3_point3D_ids = np.array(img_3.point3D_ids)
-    img_3_point3D_ids = img_3_point3D_ids[img_3_point3D_ids != -1]
 
-    overlap = set(img_1_point3D_ids).intersection(set(img_2_point3D_ids)).intersection(img_3_point3D_ids)
+    overlap = set(img_1_point3D_ids).intersection(set(img_2_point3D_ids))
 
-    if len(overlap) < 5:
-        return 0.0, 0.0, 0.0
+    if len(overlap) < 10:
+        return 0.0, 0.0
 
     pts_img_1 = []
     pts_img_2 = []
-    pts_img_3 = []
 
     for pt_id in list(overlap):
         pt = pts[pt_id]
-        if img_id1 in pt.image_ids and img_id2 in pt.image_ids and img_id3 in pt.image_ids:
+        if img_id1 in pt.image_ids and img_id2 in pt.image_ids:
             idx1 = np.where(pt.image_ids == img_id1)[0][0]
             idx2 = np.where(pt.image_ids == img_id2)[0][0]
-            idx3 = np.where(pt.image_ids == img_id3)[0][0]
 
             im_idx1 = pt.point2D_idxs[idx1]
             im_idx2 = pt.point2D_idxs[idx2]
-            im_idx3 = pt.point2D_idxs[idx3]
 
             pts_img_1.append(img_1.xys[im_idx1])
             pts_img_2.append(img_2.xys[im_idx2])
-            pts_img_3.append(img_3.xys[im_idx3])
 
     pts_img_1 = np.array(pts_img_1)
     pts_img_2 = np.array(pts_img_2)
-    pts_img_3 = np.array(pts_img_3)
 
     area_1 = get_area(pts_img_1) / (cam_1.width * cam_1.height)
     area_2 = get_area(pts_img_2) / (cam_2.width * cam_2.height)
-    area_3 = get_area(pts_img_3) / (cam_3.width * cam_3.height)
 
-    return area_1, area_2, area_3
+    return area_1, area_2
 
 
 def generate_random_samples(images, pts, args):
     if not args.point_sampling:
-        return random.sample(list(images.keys()), 3)
+        return random.sample(list(images.keys()), 2)
 
     while True:
         pt = random.choice(list(pts.values()))
         pt_img_ids = list(pt.image_ids)
-        if len(pt_img_ids) >= 3:
-            return random.sample(pt_img_ids, 3)
+        if len(pt_img_ids) >= 2:
+            return random.sample(pt_img_ids, 2)
 
 
-def create_triplets(out_dir, cameras, images, pts, args):
+def create_pairs(out_dir, cameras, images, pts, args):
     np.random.seed(args.seed)
     random.seed(args.seed)
     output = 0
@@ -166,33 +158,32 @@ def create_triplets(out_dir, cameras, images, pts, args):
     matcher = lightglue.LightGlue(features=args.features).eval().cuda()
 
     if args.area is not None:
-        h5_path_str = f'triplets-a{args.area}-{get_matcher_string(args)}-LG.h5'
+        h5_path_str = f'pairs-a{args.area}-{get_matcher_string(args)}-LG.h5'
     else:
-        h5_path_str = f'triplets-{get_matcher_string(args)}-LG.h5'
+        h5_path_str = f'pairs-{get_matcher_string(args)}-LG.h5'
     h5_path = os.path.join(out_dir, h5_path_str)
     h5_file = h5py.File(h5_path, 'w')
     print("Writing matches to: ", h5_path)
 
-    triplets = []
+    pairs = []
 
     id_list = list([k for k, v in images.items()])
     inverse_id_list = {v.name.split('.')[0]: k for k,v in images.items()}
 
     if args.load:
-        triples_txt_path = os.path.join(out_dir, f'triplets-{get_matcher_string(args)}-LG.txt')
-        print("Using previous triplets from:", triples_txt_path)
-        with open(triples_txt_path, 'r') as f:
-            loaded_triplets = f.readlines()
+        pairs_txt_path = os.path.join(out_dir, f'pairs-{get_matcher_string(args)}-LG.txt')
+        print("Using previous pairs from:", pairs_txt_path)
+        with open(pairs_txt_path, 'r') as f:
+            loaded_pairs = f.readlines()
 
-        total = len(loaded_triplets)
+        total = len(loaded_pairs)
         img_ids_list = []
-        for triplet in loaded_triplets:
-            name_1, name_2, name_3 = triplet.strip().split(' ')
+        for pair in loaded_pairs:
+            name_1, name_2 = pair.strip().split(' ')
             img_ids_list.append((inverse_id_list[name_1.split('.')[0]],
-                                 inverse_id_list[name_2.split('.')[0]],
-                                 inverse_id_list[name_3.split('.')[0]]))
+                                 inverse_id_list[name_2.split('.')[0]]))
     elif args.num_samples is None:
-        img_ids_list = list(itertools.combinations(id_list, 3))
+        img_ids_list = list(itertools.combinations(id_list, 2))  # Changed from 3 to 2
         total = len(img_ids_list)
     else:
         total = args.num_samples
@@ -210,149 +201,57 @@ def create_triplets(out_dir, cameras, images, pts, args):
                 all_counter += 1
                 pbar.update(1)
 
-
             label = '-'.join([images[x].name.split('.')[0] for x in img_ids])
-
 
             if label in h5_file:
                 continue
 
             min_area = 0.1 if args.area is None else args.area
-            area_1, area_2, area_3 = get_overlap_areas(cameras, images, pts, img_ids)
-            if area_1 > min_area and area_2 > min_area and area_3 > min_area:
-                img_1, img_2, img_3 = (images[x] for x in img_ids)
+            area_1, area_2 = get_overlap_areas(cameras, images, pts, img_ids)
+            if area_1 > min_area and area_2 > min_area:
+                img_1, img_2 = (images[x] for x in img_ids)
 
                 feats_1 = features[img_1.name.split(".")[0]]
                 feats_2 = features[img_2.name.split(".")[0]]
-                feats_3 = features[img_3.name.split(".")[0]]
 
                 out_12 = matcher({'image0': feats_1, 'image1': feats_2})
-                out_13 = matcher({'image0': feats_1, 'image1': feats_3})
-                out_23 = matcher({'image0': feats_2, 'image1': feats_3})
 
                 scores_12 = out_12['matching_scores0'][0].detach().cpu().numpy()
-                scores_13 = out_13['matching_scores0'][0].detach().cpu().numpy()
-                scores_23 = out_23['matching_scores0'][0].detach().cpu().numpy()
-
                 matches_12 = out_12['matches0'][0].detach().cpu().numpy()
-                matches_13 = out_13['matches0'][0].detach().cpu().numpy()
-                matches_23 = out_23['matches0'][0].detach().cpu().numpy()
 
                 idxs = []
 
                 for idx_1, idx_2 in enumerate(matches_12):
                     if idx_2 == -1:
                         continue
-                    if matches_13[idx_1] == -1:
-                        continue
-                    idx_3 = matches_13[idx_1]
+                    idxs.append((idx_1, idx_2))
 
-                    if matches_23[idx_2] != idx_3:
-                        continue
-
-                    idxs.append((idx_1, idx_2, idx_3))
-
-                out_array = np.empty([len(idxs), 9])
+                out_array = np.empty([len(idxs), 5])  # x1, y1, x2, y2, score
 
                 for i, x in enumerate(idxs):
-                    idx_1, idx_2, idx_3 = x
+                    idx_1, idx_2 = x
                     point_1 = feats_1['keypoints'][0, idx_1].detach().cpu().numpy()
                     point_2 = feats_2['keypoints'][0, idx_2].detach().cpu().numpy()
-                    point_3 = feats_3['keypoints'][0, idx_3].detach().cpu().numpy()
                     score_12 = scores_12[idx_1]
-                    score_13 = scores_13[idx_1]
-                    score_23 = scores_23[idx_2]
-                    out_array[i] = np.array([*point_1, *point_2, *point_3, score_12, score_13, score_23])
+                    out_array[i] = np.array([*point_1, *point_2, score_12])
 
                 if len(idxs) < 10:
                     continue
 
                 h5_file.create_dataset(label, shape=out_array.shape, data=out_array)
-                triplets.append(' '.join([images[x].name.split('.')[0] for x in img_ids]))
+                pairs.append(' '.join([images[x].name.split('.')[0] for x in img_ids]))
 
                 if args.num_samples is not None:
                     pbar.update(1)
                     output += 1
 
     if args.area is None:
-        triples_txt_path = os.path.join(out_dir, f'triplets-{get_matcher_string(args)}-LG.txt')
+        pairs_txt_path = os.path.join(out_dir, f'pairs-{get_matcher_string(args)}-LG.txt')
     else:
-        triples_txt_path = os.path.join(out_dir, f'triplets-a{args.area}-{get_matcher_string(args)}-LG.txt')
-    print("Writing list of triplets to: ", triples_txt_path)
-    with open(triples_txt_path, 'w') as f:
-        f.writelines(line + '\n' for line in triplets)
-
-
-def create_triplets_loftr(out_dir, img_path, cameras, images, pts, args):
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    output = 0
-
-    matcher = LoFTRMatcher(max_dim = args.resize, device='cuda')
-    args.max_features = 0
-    h5_path = os.path.join(out_dir, f'triplets-{get_matcher_string(args)}.h5')
-    h5_file = h5py.File(h5_path, 'w')
-
-    triplets = []
-
-    print("Writing matches to: ", h5_path)
-
-    with tqdm(total=args.num_samples) as pbar:
-        while output < args.num_samples:
-            img_ids = random.sample(list(images.keys()), 3)
-            label = '-'.join([images[x].name.split('.')[0] for x in img_ids])
-
-            if label in h5_file:
-                continue
-
-            area_1, area_2, area_3 = get_overlap_areas(cameras, images, pts, img_ids)
-            if area_1 > 0.1 and area_2 > 0.1 and area_3 > 0.1:
-                img_1, img_2, img_3 = (images[x] for x in img_ids)
-
-                img_array_1 = read_loftr_image(img_path, img_1, cameras)
-                img_array_2 = read_loftr_image(img_path, img_2, cameras)
-                img_array_3 = read_loftr_image(img_path, img_3, cameras)
-
-                if img_array_1 is None or img_array_2 is None or img_array_3 is None:
-                    print("Noooo")
-                    continue
-
-                scores_12, kp_12_1, kp_12_2 = matcher.match(img_array_1, img_array_2)
-                scores_13, kp_13_1, kp_13_3 = matcher.match(img_array_1, img_array_3)
-
-
-                idxs = []
-
-                for idx_12, kp in enumerate(kp_12_1):
-                    idx_13 = np.where(np.all(kp_13_1==kp, axis=1))[0]
-
-                    if len(idx_13) > 0:
-                        idxs.append((idx_12, idx_13[0]))
-
-                out_array = np.empty([len(idxs), 9])
-
-                for i, x in enumerate(idxs):
-                    idx_12, idx_13 = x
-                    point_1 = kp_12_1[idx_12]
-                    point_2 = kp_12_2[idx_12]
-                    point_3 = kp_13_3[idx_13]
-                    score_12 = scores_12[idx_12]
-                    score_13 = scores_13[idx_13]
-
-                    out_array[i] = np.array([*point_1, *point_2, *point_3, score_12, score_13, 0.0])
-
-                h5_file.create_dataset(label, shape=out_array.shape, data=out_array)
-                triplets.append(label.replace('-', ' '))
-                pbar.update(1)
-                output += 1
-
-    if args.area is None:
-        triples_txt_path = os.path.join(out_dir, f'triplets-{get_matcher_string(args)}.txt')
-    else:
-        triples_txt_path = os.path.join(out_dir, f'triplets-a{args.area}-{get_matcher_string(args)}.txt')
-    print("Writing list of triplets to: ", triples_txt_path)
-    with open(triples_txt_path, 'w') as f:
-        f.writelines(line + '\n' for line in triplets)
+        pairs_txt_path = os.path.join(out_dir, f'pairs-a{args.area}-{get_matcher_string(args)}-LG.txt')
+    print("Writing list of pairs to: ", pairs_txt_path)
+    with open(pairs_txt_path, 'w') as f:
+        f.writelines(line + '\n' for line in pairs)
 
 
 def fix_indoor6_images(images, img_path):
@@ -395,11 +294,8 @@ def prepare_single(args, subset):
         os.makedirs(out_dir)
 
     create_gt_h5(cameras, images, out_dir, args)
-    if 'loftr' in args.features:
-        create_triplets_loftr(out_dir, img_path, cameras, images, points, args)
-    else:
-        extract_features(img_path, images, cameras, out_dir, args)
-        create_triplets(out_dir, cameras, images, points, args)
+    extract_features(img_path, images, cameras, out_dir, args)
+    create_pairs(out_dir, cameras, images, points, args)
 
 
     # gen = cam_pair_generator(matcher, subset_path, img_path, cameras, images, points, max_pairs=num_samples)
